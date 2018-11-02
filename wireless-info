@@ -25,7 +25,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-SCRIPTDATE="2017-12-05 04:13 +0100"
+SCRIPTDATE="2018-10-22 05:34 +0200"
 FILEBASE="wireless-info"
 OUTPUTDIR="$PWD"
 OUTPUTDIRFB="/tmp"
@@ -33,7 +33,7 @@ OUTPUTDIRFB="/tmp"
 MODMATCHES="(air|ar5|at7|ath[^3]?|b43|bcma|brcm|carl|ipw|iwl|ndis|r(818|8192[eu]|871|92su)|8(188|189|192|723|812)[acde][esu]|rt[23567]|rtl|ssb|wl|(cfg|mac)80211)"
 LSMODMATCHES="(wmi|(dell|ideapad)[-_]laptop)"
 IFACEMATCHES="(wlan[0-9]|eth[0-9])"
-DMESGMATCHES="(firmware|[nN]etwork)"
+DMESGMATCHES="(firmware|[nN]etwork|sdio|SDIO)"
 NMPROFMATCHES="\(\[connection\]\|id=\|type=\|permissions=\|autoconnect=\|\[802-11-wireless\]\|\[wifi\]\|ssid=\|bssid=\|mac-address\(-blacklist\)\?=\|mtu=\|\[802-1x\]\|[[:graph:]]*ca-certs\?=\|\[ipv[46]\]\|method=\)"
 
 DMESGEXCL="apparmor|(cfg|mac)80211"
@@ -191,22 +191,36 @@ fi
 printf "\n##### rfkill ############################\n\n"
 rfkill list all
 
+printf "\n##### secure boot #######################\n\n"
+if [ -x /usr/bin/mokutil ]; then
+    mokutil --sb-state
+else
+    echo "'mokutil' is not installed (package \"mokutil\")."
+fi
+
 printf "\n##### lsmod #############################\n\n"
 LSMOD=$(lsmod | egrep "(^|[[:punct:] ])($MODMATCHES|$LSMODMATCHES)[^[:punct:] ]*([[:punct:] ]|$)")
 echo "$LSMOD"
 
 printf "\n##### interfaces ########################\n\n"
-sed '/^#/d;s/^wpa-psk [[:graph:]]\+/wpa-psk <WPA key removed>/' /etc/network/interfaces
+for IFACESFILE in $(find /etc/network/interfaces{,.d} -type f 2> /dev/null | sort); do
+    IFACESFLCNT=$(sed '/^#/d;s/^wpa-psk [[:graph:]]\+/wpa-psk <WPA key removed>/' $IFACESFILE)
+    if [ -n "$IFACESFLCNT" ]; then
+	printf "[%s]\n%s\n\n" "$IFACESFILE" "$IFACESFLCNT"
+    fi
+done
 
 printf "\n##### ifconfig ##########################\n\n"
-if [ -x /sbin/ifconfig ]; then
+if [ -x /bin/ip ]; then
+    IFCONFIG=$(ip address show)
+elif [ -x /sbin/ifconfig ]; then
     IFCONFIG=$(ifconfig -a)
 else
-    IFCONFIG=$(ip address show)
+    echo "'ip' is not installed (package \"iproute2\")."
 fi
 echo "$IFCONFIG"
 IFCONFIG=$(sed -n '1h; 1!H; ${g;s/\n /\\ /g;p}' <<< "$IFCONFIG")
-IFACESETH=($(sed -n 's/^\([^ ]\+\)[ ]\+Link encap:Ethernet.*/\1/p; s#^[0-9]\+: \([^ :]\+\):.* link/ether.*#\1#p' <<< "$IFCONFIG"))
+IFACESETH=($(sed -n 's#^[0-9]\+: \([^ :]\+\):.* link/ether.*#\1#p; s/^\([^ :]\+\):\?.* \(Link encap:Ethernet\|ether\).*/\1/p' <<< "$IFCONFIG"))
 if (( ${#IFACESETH[@]} > 0 )); then
     IFETHMATCHES=${IFACESETH[@]}
     IFACEMATCHES="($IFACEMATCHES|(${IFETHMATCHES// /|}))"
@@ -216,13 +230,16 @@ printf "\n##### iwconfig ##########################\n\n"
 iwconfig
 
 printf "\n##### route #############################\n\n"
-if [ -x /sbin/route ]; then
+if [ -x /bin/ip ]; then
+    ip route show
+elif [ -x /sbin/route ]; then
     route -n
 else
-    ip route show
+    echo "'ip' is not installed (package \"iproute2\")."
 fi
 
 printf "\n##### resolv.conf #######################\n\n"
+stat -c "[%a %U %N]" /etc/resolv.conf
 grep -v '^#' /etc/resolv.conf
 
 printf "\n##### network managers ##################\n\n"
@@ -253,12 +270,13 @@ fi
 printf "\n##### NetworkManager.state ##############\n\n"
 cat -s /var/lib/NetworkManager/NetworkManager.state
 
-printf "\n##### NetworkManager.conf ###############\n\n"
-grep -v '^#' /etc/NetworkManager/NetworkManager.conf
-if [ -f /etc/NetworkManager/nm-system-settings.conf ]; then
-    printf "\nnm-system-settings.conf (used up to Ubuntu 10.04):\n\n"
-    grep -v '^#' /etc/NetworkManager/nm-system-settings.conf
-fi
+printf "\n##### NetworkManager config #############\n\n"
+for NMCONFFILE in $(find /{etc,usr/lib}/NetworkManager/{NetworkManager.conf,conf.d} -name "*.conf" 2> /dev/null | sort); do
+    NMCONFCNT=$(egrep -v '^(#|$)' $NMCONFFILE)
+    if [ -n "$NMCONFCNT" ]; then
+	printf "[[%s]]\n%s\n\n" "$NMCONFFILE" "$NMCONFCNT"
+    fi
+done
 
 printf "\n##### NetworkManager profiles ###########\n\n"
 if [ -d /etc/NetworkManager/system-connections ]; then
@@ -396,8 +414,8 @@ RESULTS=$(cat -s "$OUTPUTDIR/$FILEBASE.txt")$'\n'
 ORIGIFS="$IFS"
 IFS=$'\n'
 
-IFACESIDS=($(sed -n "/\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}/ {/\(00:\)\{5\}00/! {s/^\([^ ]\+\)[ ]\+.*HWaddr.*/'\1'/p; s/^[0-9]\+: \([^ :]\+\):.*/'\1'/p}}" <<< "$IFCONFIG"))
-IFACESMACS=($(sed -n '/\(00:\)\{5\}00/! s#.*\(HWaddr\|link/[^ ]\+\) \(\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}\).*#\2#p' <<< "$IFCONFIG"))
+IFACESIDS=($(sed -n "/\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}/ {/\(00:\)\{5\}00/! {s/^[0-9]\+: \([^ :]\+\):.*/'\1'/p; s/^\([^ :]\+\):\? .*/'\1'/p}}" <<< "$IFCONFIG"))
+IFACESMACS=($(sed -n '/\(00:\)\{5\}00/! s#.*\(HWaddr\|link/[^ ]\+\|ether\) \(\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}\).*#\2#p' <<< "$IFCONFIG"))
 IFACESIP6S=($(ip6-mac "${IFACESMACS[@]}"))
 
 WLAPSIWLIDS=($(sed -n "/^[ ]*Cell [0-9]\+/,/^[ ]*ESSID:/ {/^[ ]*Cell [0-9]\+/h; /^[ ]*ESSID:/ {H;g;s/^[ ]*Cell 0\?\([0-9]\+\).*ESSID:\"\(.*\)\"$/'\2' [AC\1]/p}}" <<< "$IWLISTSCAN"))
@@ -430,7 +448,7 @@ for WLAPNMNR in "${!WLAPSNMMACS[@]}"; do
     MACMASKSED+=" /${WLAPSNMIP6S[$WLAPNMNR]}/ s;${WLAPSNMIP6S[$WLAPNMNR]/#\\(::/\(};<IP6 ${WLAPSNMIDS[$WLAPNMNR]} [AN$(($WLAPNMNR + 1))]>;I;"
 done
 
-sed "$MACMASKSED /\([[:alnum:]]\{2\}:\)\{6,\}/! s/\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}/<MAC address>/" <<< "$RESULTS" > "$OUTPUTDIR/$FILEBASE.txt"
+sed "$MACMASKSED /\([[:alnum:]]\{2\}:\)\{6,\}/! s/\([[:alnum:]]\{2\}:\)\{5\}[[:alnum:]]\{2\}/<MAC address>/g" <<< "$RESULTS" > "$OUTPUTDIR/$FILEBASE.txt"
 
 ##### The End #####
 
